@@ -1,0 +1,691 @@
+---
+title: "Analysis of Image-based Spatial Data (NanoString CosMx) in Seurat"
+output:
+  html_document:
+    theme: united
+    df_print: kable
+date: 'Compiled: `r format(Sys.Date(), "%B %d, %Y")`'
+---
+***
+
+```{r setup, include=FALSE}
+all_times <- list()  # store the time for each chunk
+knitr::knit_hooks$set(time_it = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now, units = "secs")
+      all_times[[options$label]] <<- res
+    }
+  }
+}))
+knitr::opts_chunk$set(
+  tidy = TRUE,
+  tidy.opts = list(width.cutoff = 95),
+  message = FALSE,
+  warning = FALSE,
+  time_it = TRUE,
+  error = TRUE
+)
+```
+
+# Overview
+
+Using Seurat vignette, here I try to analyze 
+* Nanostring CosMx Spatial Molecular Imager
+[ref1. nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/seurat-cosmx-basics/](https://nanostring-biostats.github.io/CosMx-Analysis-Scratch-Space/posts/seurat-cosmx-basics/)
+
+[ref2. satijalab.org/seurat/articles/seurat5_spatial_vignette_2.html](https://satijalab.org/seurat/articles/seurat5_spatial_vignette_2.html)
+
+```{r install libraries 001}
+# renv::install("future")
+# renv::install("ggplot2")
+# renv::install("Seurat")
+# renv::install("ggthemes")
+# renv::install("ggdark")
+```
+
+
+
+First, we load the packages necessary for this vignette.
+
+```{r init, message=FALSE, warning=FALSE}
+library(Seurat)
+library(future)
+plan("multisession", workers = 4)
+library(ggplot2)
+```
+
+
+# Human Lung: Nanostring CosMx Spatial Molecular Imager
+
+This dataset was produced using Nanostring CosMx Spatial Molecular Imager (SMI). The CosMX SMI performs multiplexed single molecule profiling, can profile both RNA and protein targets, and can be applied directly to FFPE tissues. The dataset represents 8 FFPE samples taken from 5 non-small-cell lung cancer (NSCLC) tissues, and is available for [public download](https://www.nanostring.com/products/cosmx-spatial-molecular-imager/ffpe-dataset/). The gene panel consists of 960 transcripts. 
+
+For this dataset, instead of performing unsupervised analysis, we map the Nanostring profiles to our Azimuth Healthy Human Lung reference, which was defined by scRNA-seq. We used Azimuth version 0.4.3 with the [human lung](https://azimuth.hubmapconsortium.org/references/#Human%20-%20Lung%20v1) reference version 1.0.0.  You can download the precomputed results [here](https://seurat.nygenome.org/vignette_data/spatial_vignette_2/nanostring_data.Rds), which include annotations, prediction scores, and a UMAP visualization. The median number of detected transcripts/cell is 249, which does create uncertainty for the annotation process.
+
+[ref3. github.com/satijalab/seurat/issues/6786](https://github.com/satijalab/seurat/issues/6786)
+```{r load}
+data.dir <- "./data/Lung5_Rep1/Lung5_Rep1-Flat_files_and_images"
+mtx.file <- "./data/Lung5_Rep1/Lung5_Rep1-Flat_files_and_images/Lung5_Rep1_exprMat_file.csv"
+# Path to Nanostring cell x gene matrix CSV
+metadata.file <- "./data/Lung5_Rep1/Lung5_Rep1-Flat_files_and_images/Lung5_Rep1_metadata_file.csv"
+# Contains metadata including cell center, area, and stain intensities
+molecules.file <- "./data/Lung5_Rep1/Lung5_Rep1-Flat_files_and_images/Lung5_Rep1_tx_file.csv"
+# Path to molecules file
+
+# Path to segmentation CSV is not provided
+
+data <- Seurat::ReadNanostring(data.dir = data.dir, type = "centroids")
+nano.obj <- Seurat::CreateSeuratObject(counts = data$matrix)
+
+fov.name.pre <- "Lung5.Rep1.Fov."
+metadata.df <- read.csv(metadata.file)
+fov.numbers <-  unique(metadata.df[ ,"fov"])
+for (i in fov.numbers) {
+  fov.name <- paste(fov.name.pre, i, sep="")
+  print(fov.name)
+}
+
+rownames(metadata.df) <- paste(metadata.df$cell_ID, "_", metadata.df$fov, sep="")
+nano.obj <- AddMetaData(
+  object = nano.obj,
+  metadata = metadata.df
+)
+head(nano.obj[[]])
+
+nano.obj.original <- nano.obj
+
+fov.name.total <- paste(fov.name.pre, "Total", sep = "")
+data <- Seurat::ReadNanostring(data.dir = data.dir, type = "centroids")
+cents <- SeuratObject::CreateCentroids(data$centroids)
+
+molecules.df <- read.csv(molecules.file)
+molecules.df <- dplyr::mutate(molecules.df, cell = paste(cell_ID, "_", fov, sep = ""))
+# molecules.df <- readRDS("./data/Lung5_Rep1/molecules.df.RDS")
+molecules.df.3columns <- molecules.df[, c(3, 4, 8)]
+nano.mol <- CreateMolecules(molecules.df.3columns, key = "CosMx_")
+
+cents.total <- subset(cents, cell = Cells(nano.obj))
+molecules.df.temp <- dplyr::filter(molecules.df, cell %in% Cells(nano.obj))
+molecules.df.3columns.temp <- molecules.df.temp[, c(3, 4, 8)]
+nano.mol.temp <- SeuratObject::CreateMolecules(molecules.df.3columns.temp, key = "CosMx_")
+coords.temp <- SeuratObject::CreateFOV(coords = list("centroids" = cents.total), type = "centroids", molecules = nano.mol.temp, assay = "RNA", key = "CosMx_", name = NULL)
+nano.obj[[fov.name.total]] <- coords.temp
+
+fov.numbers <-  unique(metadata.df[ ,"fov"])
+for (i in fov.numbers) {
+  # i=1
+  fov.name <- paste(fov.name.pre, i, sep="")
+  nano.obj.subset <- subset(nano.obj.original, subset = fov == i)
+  cents.temp <- subset(cents, cell = Cells(nano.obj.subset))
+  molecules.df.temp <- dplyr::filter(molecules.df, cell %in% Cells(nano.obj.subset))
+  molecules.df.3columns.temp <- molecules.df.temp[, c(3, 4, 8)]
+  nano.mol.temp <- SeuratObject::CreateMolecules(molecules.df.3columns.temp, key = "CosMx_")
+  coords.temp <- SeuratObject::CreateFOV(coords = list("centroids" = cents.temp), type = "centroids", molecules = nano.mol.temp, assay = "RNA", key = "CosMx_", name = NULL)
+  nano.obj[[fov.name]] <- coords.temp
+}
+```
+
+cell metadata
+```{r looking at metadata}
+head(nano.obj@meta.data)
+```
+
+
+Transcript counts. Here, transcript counts are in the 'Nanostring' assay but in other objects they may be stored in an 'RNA' assay.
+```{r looking at metadata 2}
+nano.obj@assays$RNA$counts[1:5, 1:5]
+```
+
+cluster findings
+```{r calculate clusters}
+options(future.globals.maxSize= 891289600)
+nano.obj <- SCTransform(nano.obj, assay = "RNA")
+nano.obj <- RunPCA(nano.obj, npcs = 30, features = rownames(nano.obj))
+nano.obj <- RunUMAP(nano.obj, dims = 1:30)
+nano.obj <- FindNeighbors(nano.obj, reduction = "pca", dims = 1:30)
+nano.obj <- FindClusters(nano.obj, resolution = 0.3)
+```
+
+
+## UMAP positions
+```{r looking at metadata 3}
+Idents(nano.obj) <- nano.obj@meta.data[["seurat_clusters"]]
+DefaultAssay(nano.obj) <- "RNA"
+nano.obj@reductions$umap@cell.embeddings[1:10,]
+Seurat::DimPlot(nano.obj)
+Seurat::FeaturePlot(nano.obj, features = c("CD8", "FOXP3", "GAD1", "SST", "GFAP", "Mean.CD45"), slot = "counts", max.cutoff = "q95", coord.fixed = TRUE)
+```
+
+Image names. Each slide is stored as a separate image within the object.
+```{r looking at metadata 4}
+Images(nano.obj)
+```
+
+Positions in space, here shown for one image / slide
+```{r looking at metadata 5}
+nano.obj@images[[Images(nano.obj)[1]]]$centroids@coords[1:20,] # In this object, this is equivalent to: seu.obj@images$Run1000.S1.Half$centroids@coords[1:10,]
+```
+
+# Plot data in space
+Within the Seurat object, each slide is stored as a separate ‘image’ or ‘fov’. This is an unfortunate naming convention difference between CosMx nomenclature and the Seurat package. What Seurat refers to as an ‘fov’ is what NanoString refers to as a slide. When plotting cells in space, you need to specify the Seurat ‘fov’ to plot, and this is equivalent to choosing which CosMx slide to plot.
+
+Plot all cells on one slide in space, coloring by cell type.
+
+## Get name of the first image
+```{r looking at image 1}
+image1 <- Images(nano.obj)[1]
+```
+
+
+## Plot all cells.
+We recommend setting the border color to 'NA' as the default 'white' often masks all cells when zoomed out, leading to a fully white plot.
+```{r looking at image 2}
+p1 <- ImageFeaturePlot(nano.obj, features = "Mean.CD45", border.color = "black")
+p2 <- ImageDimPlot(nano.obj, molecules = "Mean.CD45", nmols = 10000, alpha = 1, mols.cols = "red")
+p1 + p2
+```
+
+Plot the location of individual transcripts with the ‘molecules’ option.
+```{r looking at image 3}
+ImageDimPlot(nano.obj,
+             fov = Images(nano.obj)[1],
+             border.color = "black",
+             alpha = 0.9, # Reduce alpha of cell fills to better visualize the overlaying molcules
+             molecules = NA,
+             mols.size = 0.2,
+             nmols = 100000, # Set the total number of molecules to visualize
+             axes = TRUE)
+```
+
+
+(divingintogeneticsandgenomics.com/post/how-to-construct-a-spatial-object-in-seurat/)[https://divingintogeneticsandgenomics.com/post/how-to-construct-a-spatial-object-in-seurat/]
+```{r, fig.width=8, fig.height=4}
+## This gives you the image 
+ggplot2::ggplot(metadata.df, aes(x= CenterX_global_px, y = CenterY_global_px))+
+        ggplot2::geom_point(size = 0.1, color = "grey") + ggplot2::coord_fixed() + 
+        ggdark::dark_mode(ggthemes::theme_fivethirtyeight())
+
+ggplot2::ggplot(metadata.df, aes(x= CenterX_global_px, y = CenterY_global_px))+
+        ggplot2::geom_point(size = 0.1, color = "grey") + ggplot2::coord_fixed()
+```
+
+
+Some helper function:
+```{r some helper function}
+library(magrittr)
+
+multigene_expression_df <- function(obj, assay = "RNA", layer = "count", 
+                                    vector.genes = NULL, cells = NULL){
+  i = 0
+  for (gene in vector.genes){
+    i = i + 1;
+    df.i <- get_expression_data(obj, assay = assay, layer = layer, genes = gene, cells = NULL)
+    if (i == 1){
+      df <- df.i
+    } else {
+      df.i <- df.i[, c(1,2)]
+      head(df.i)
+      df <- dplyr::left_join(df.i, df, by = "cell")
+    }
+  }
+  return(df)
+}
+
+matrix_to_expression_df<- function(x, obj){
+        df <- x %>%
+                as.matrix() %>% 
+                as.data.frame() %>%
+                tibble::rownames_to_column(var= "gene") %>%
+                tidyr::pivot_longer(cols = -1, names_to = "cell", values_to = "expression") %>%
+                tidyr::pivot_wider(names_from = "gene", values_from = expression) %>%
+                dplyr::left_join(obj@meta.data %>% 
+                                  tibble::rownames_to_column(var = "cell"))
+        return(df)
+}
+
+
+get_expression_data <- function(obj, assay = "RNA", layer = "count", 
+                               genes = NULL, cells = NULL){
+        if (is.null(genes) & !is.null(cells)){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (!is.null(genes) & is.null(cells)){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[genes, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (is.null(genes) & is.null(cells)){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else {
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[genes, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        }
+        return(df)
+}
+```
+
+
+helper function for Dim graph
+```{r some helper function 2}
+ImageDimPlotGenesPerCell <- function(df, genes = NULL, colors = "glasbey", size = 0.1){
+  # "alphabet", "alphabet2", "glasbey", "polychrome", "stepped", and "parade"
+  color.palette <- c("alphabet", "alphabet2", "glasbey", "polychrome", "stepped", "parade")
+  if (colors %in% color.palette){
+    colors <- Seurat::DiscretePalette(32, palette = colors)
+  }
+  
+  q95 <- quantile(df[[genes]], 0.95)
+  ggDim <- ggplot2::ggplot(df, aes(x= CenterX_global_px, y=CenterY_global_px)) + 
+    ggplot2::scale_color_gradient(low = "grey", high = colors[1], limit = c(0, q95)) + 
+    ggplot2::geom_point(aes(color = df[[genes]]), size = size, alpha = 1, shape = 19) + 
+    ggplot2::coord_fixed() + 
+    ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+    theme(plot.title = element_text(family = "sans"), 
+          plot.background = element_rect(fill = "grey10"), 
+          panel.background = element_blank(), 
+          panel.grid.major = element_line(color = "grey30", size = 0.2), 
+          panel.grid.minor = element_line(color = "grey30", size = 0.2), 
+          legend.background = element_blank(), axis.ticks = element_blank(), 
+          axis.line = element_line(size = 0.5), legend.key = element_blank())
+  ggDim
+}
+
+```
+
+Trial to use functions
+```{r function trial}
+EPCAM.df <- get_expression_data(nano.obj, assay = "RNA", layer = "counts", genes = "EPCAM")
+FOXP3.df <- get_expression_data(nano.obj, assay = "RNA", layer = "counts", genes = "FOXP3")
+genes.df <- multigene_expression_df(nano.obj, assay = "RNA", layer = "count", 
+                                    vector.genes = c("EPCAM", "FOXP3"), cells = NULL)
+# quantile(genes.df[["EPCAM"]], 0.95)
+ggg <- ImageDimPlotGenesPerCell(genes.df, genes = "EPCAM", colors = "blue", size = 0.1)
+ggg
+```
+
+```{r example}
+ ggplot2::ggplot(genes.df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::scale_color_gradient(low = "grey", high = "red", limit = c(0, 8)) +
+        ggplot2::geom_point(aes(color = EPCAM), size = 0.1, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank())
+```
+
+
+helper function for molecules
+```{r function for molecules}
+
+position_of_molecules <- function(obj, fov, genes){
+  i = 0
+  for (gene in genes){
+    i = i + 1
+    molecules.df.extracted <- 
+      data.frame(obj@images[[fov]]@molecules[["molecules"]][[gene]]@coords)
+    colnames(molecules.df.extracted) <- c("CenterX_global_px","CenterY_global_px")
+    molecules.df.extracted <- dplyr::mutate(molecules.df.extracted, gene.name = gene)
+    if (i == 1){
+      molecules.df.extracted.total <- molecules.df.extracted
+    } else {
+      molecules.df.extracted.total <- 
+        rbind(molecules.df.extracted.total, molecules.df.extracted)
+    }
+  }
+  return(molecules.df.extracted.total)
+}
+
+
+# test.df1 <- data.frame(nano.obj@images[["Lung5.Rep1.Fov.Total"]]@molecules[["molecules"]][["AATK"]]@coords)
+# colnames(test.df1) <- c("CenterX_global_px","CenterY_global_px")
+# test.df1 <- dplyr::mutate(test.df1, gene.name = "AATK")
+
+# test.df2 <- data.frame(nano.obj@images[["Lung5.Rep1.Fov.Total"]]@molecules[["molecules"]][["EPCAM"]]@coords)
+# colnames(test.df2) <- c("CenterX_global_px","CenterY_global_px")
+# test.df2 <- dplyr::mutate(test.df2, gene.name = "EPCAM")
+
+# test.df <- rbind(test.df1, test.df2)
+test.df <- position_of_molecules(nano.obj, fov = "Lung5.Rep1.Fov.Total", genes = c("AATK", "EPCAM", "TAGLN"))
+# class(test.df) # "matrix""array"
+# ggplot2::ggplot(data = test.df, aes(CenterX_global_px, CenterY_global_px)) +  ggplot2::geom_point(shape = 19, size = 0.5, color = "green")
+# ggg + geom_point(data = test.df, aes(CenterX_global_px, CenterY_global_px), 
+#                  shape = 19, size = 0.5, color = "green")
+
+ImageMoleculePlot <- function(df, size = 0.1){
+  gg.molecules <- ggplot2::ggplot(df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::geom_point(aes(color = gene.name), size = size, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank()) + 
+        guides(colour = guide_legend(override.aes = list(size=2)))
+  return(gg.molecules)
+}
+
+ImageMoleculePlot(test.df, size = 0.1)
+
+# ggplot2::ggplot(test.df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+#         ggplot2::geom_point(aes(color = gene.name), size = 0.1, alpha = 1, shape = 19) + 
+#         ggplot2::coord_fixed() + 
+#         ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+#         theme(plot.title = element_text(family = "sans"),
+#         plot.background = element_rect(fill = "grey10"),
+#         panel.background = element_blank(),
+#         panel.grid.major = element_line(color = "grey30", size = 0.2),
+#         panel.grid.minor = element_line(color = "grey30", size = 0.2),
+#         legend.background = element_blank(),
+#         axis.ticks = element_blank(),
+#         axis.line = element_line(size = 0.5),
+#         legend.key = element_blank()) + 
+#        guides(colour = guide_legend(override.aes = list(size=2)))
+ImageDimClusterPlot <- function(obj, size = 0.1, colorby = "seurat_clusters"){
+  Seurat.Clusters <- obj@meta.data[[colorby]]
+  ggplot2::ggplot(obj@meta.data, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::geom_point(aes(color = Seurat.Clusters), 
+                            size = size, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank()) + 
+        guides(colour = guide_legend(override.aes = list(size=2)))
+}
+
+ImageDimClusterPlot(nano.obj, size = 0.1, colorby = "seurat_clusters")
+
+
+```
+
+Get the expression data and merge with the spatial information.
+```{r get expression 1}
+df <- get_expression_data(nano.obj, assay = "RNA", layer = "counts", genes = "EPCAM")
+
+head(df)
+
+ggg1  <- ggplot2::ggplot(df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::scale_color_gradient(low = "grey", high = "red", limit = c(0, 8)) +
+        ggplot2::geom_point(aes(color = EPCAM), size = 0.1, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank())
+
+        
+```
+
+
+
+
+```{r looking at image 4}
+ImageDimPlot(nano.obj,
+             fov = Images(nano.obj)[1],
+             border.color = "black",
+             alpha = 0.8, # Reduce alpha of cell fills to better visualize the overlaying molcules
+             molecules = c("SLC17A7", "GAD1", "PLP1"),
+             size = 2,
+             mols.size = 0.2,
+             nmols = 100000, # Set the total number of molecules to visualize
+             axes = FALSE)
+```
+
+
+```{r looking at image 5}
+#DefaultAssay(nano.obj) <- "RNA"
+#Seurat::Idents(nano.obj) <- "nFeature_RNA"
+
+fun_color_range <- colorRampPalette(c("white", "tomato"))  # Create color generating function
+my_colors <- fun_color_range(20)                         # Generate color range
+#  [1] "#FFFF00" "#FFF100" "#FFE400" "#FFD600" "#FFC900" "#FFBB00" "#FFAE00"
+#  [8] "#FFA100" "#FF9300" "#FF8600" "#FF7800" "#FF6B00" "#FF5D00" "#FF5000"
+# [15] "#FF4300" "#FF3500" "#FF2800" "#FF1A00" "#FF0D00" "#FF0000"
+my_colors                                                # Print color range
+gg1 <- ImageFeaturePlot(nano.obj,
+             fov = Images(nano.obj)[1],
+             border.color = "black",
+             features = "nFeature_RNA")
+             #size = 2) 
+
+gg1
+
+VlnPlot(nano.obj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2, pt.size = 0)
+
+gg1 <- ImageDimPlot(nano.obj, fov = Images(nano.obj)[1], axes = TRUE, cols = "glasbey", border.color = "black")
+
+# Color cells by log10totalcounts
+gg2 <- ImageFeaturePlot(nano.obj,
+             fov = Images(nano.obj)[1],
+             border.color = "black",
+            features = "Mean.DAPI", alpha = 1)
+
+gg1 | gg2
+
+```
+
+
+(divingintogeneticsandgenomics.com/post/how-to-construct-a-spatial-object-in-seurat/)[https://divingintogeneticsandgenomics.com/post/how-to-construct-a-spatial-object-in-seurat/]
+```{r, fig.width=8, fig.height=4}
+## This gives you the image 
+ggplot2::ggplot(metadata.df, aes(x= CenterX_global_px, y = CenterY_global_px))+
+        ggplot2::geom_point(size = 0.1, color = "grey") + ggplot2::coord_fixed() + 
+        ggdark::dark_mode(ggthemes::theme_fivethirtyeight())
+
+ggplot2::ggplot(metadata.df, aes(x= CenterX_global_px, y = CenterY_global_px))+
+        ggplot2::geom_point(size = 0.1, color = "grey") + ggplot2::coord_fixed()
+```
+
+
+Some helper function:
+```{r some helper function 3}
+library(magrittr)
+matrix_to_expression_df<- function(x, obj){
+        df<- x %>%
+                as.matrix() %>% 
+                as.data.frame() %>%
+                tibble::rownames_to_column(var= "gene") %>%
+                tidyr::pivot_longer(cols = -1, names_to = "cell", values_to = "expression") %>%
+                tidyr::pivot_wider(names_from = "gene", values_from = expression) %>%
+                dplyr::left_join(obj@meta.data %>% 
+                                  tibble::rownames_to_column(var = "cell"))
+        return(df)
+}
+
+
+get_expression_data <- function(obj, assay = "RNA", layer = "count", 
+                               genes = NULL, cells = NULL){
+        if (is.null(genes) & !is.null(cells)){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (!is.null(genes) & is.null(cells)){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[genes, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else if (is.null(genes & is.null(cells))){
+                df <- Seurat::GetAssayData(obj, assay = assay, layer = layer)[, , drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        } else {
+                df<- Seurat::GetAssayData(obj, assay = assay, layer = layer)[genes, cells, drop = FALSE] %>%
+                        matrix_to_expression_df(obj = obj)
+        }
+        return(df)
+}
+```
+
+
+Get the expression data and merge with the spatial information.
+```{r get expression 2}
+df <- get_expression_data(nano.obj, assay="RNA", layer = "counts", genes = "EPCAM")
+
+head(df)
+
+ggplot2::ggplot(df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::scale_color_gradient(low = "grey", high = "red", limit = c(0, 8)) +
+        ggplot2::geom_point(aes(color = EPCAM), size = 0.1, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank())
+
+        
+```
+
+
+```{r, fig.width=8, fig.height=4}
+## This gives you the image 
+ggplot2::ggplot(metadata.df, aes(x= CenterX_global_px, y = CenterY_global_px))+
+        ggplot2::geom_point(size = 0.1, color = "grey") + ggplot2::coord_fixed() + 
+        ggdark::dark_mode(ggthemes::theme_fivethirtyeight())
+```
+
+```{r save object}
+# saveRDS(nano.obj, file = "./data/Lung5_Rep1/nano.obj.RDS")
+```
+
+## Integration with single-cell data
+```{r load single-cell data}
+seurat.obj.lung <- readRDS("./data/Lung5_Rep1/braga_lung_demo.Rds")
+# note that setting ncells=3000 normalizes the full dataset but learns noise models on 3k
+# cells this speeds up SCTransform dramatically with no loss in performance
+library(dplyr)
+seurat.obj.lung <- SCTransform(seurat.obj.lung, ncells = 3000, verbose = FALSE) %>%
+    RunPCA(verbose = FALSE) %>%
+    RunUMAP(dims = 1:30)
+```
+
+```{r visualize single-cell data, fig.height=4}
+# the annotation is stored in the 'celltype' column of object metadata
+DimPlot(seurat.obj.lung, group.by = "celltype", label = TRUE)
+```
+```{r transfer labels, fig.height=4}
+# nano.obj <- readRDS("./data/Lung5_Rep1/nano.obj.RDS")
+anchors <- FindTransferAnchors(reference = seurat.obj.lung, query = nano.obj, normalization.method = "SCT")
+predictions.assay <- TransferData(anchorset = anchors, refdata = seurat.obj.lung$celltype, 
+                                  prediction.assay = TRUE, weight.reduction = nano.obj[["pca"]], dims = 1:30)
+nano.obj[["predictions"]] <- predictions.assay
+# Now we get prediction scores for each spot for each class. Of particular interest in the frontal cortex region are the laminar excitatory neurons. Here we can distinguish between distinct sequential layers of these neuronal subtypes, for example:
+
+DefaultAssay(nano.obj) <- "predictions"
+# SpatialFeaturePlot(nano.obj, features = c("Mast cell", "Macrophages"), pt.size.factor = 1.6, ncol = 2, crop = TRUE)
+saveRDS(nano.obj, file = "./data/Lung5_Rep1/nano.obj.predictions.RDS")
+```
+
+
+```{r get predictions}
+df <- get_expression_data(nano.obj, assay="predictions", layer = "data", genes = "Macrophages")
+
+head(df)
+
+ggplot2::ggplot(df, aes(x= CenterX_global_px, y=CenterY_global_px)) +
+        ggplot2::scale_color_gradient(low = "grey", high = "red", limit = c(0, 8)) +
+        ggplot2::geom_point(aes(color = Macrophages), size = 0.2, alpha = 1, shape = 19) + 
+        ggplot2::coord_fixed() + 
+        ggdark::dark_theme_gray(base_family = "sans", base_size = 10) + 
+        theme(plot.title = element_text(family = "sans"),
+        plot.background = element_rect(fill = "grey10"),
+        panel.background = element_blank(),
+        panel.grid.major = element_line(color = "grey30", size = 0.2),
+        panel.grid.minor = element_line(color = "grey30", size = 0.2),
+        legend.background = element_blank(),
+        axis.ticks = element_blank(),
+        axis.line = element_line(size = 0.5),
+        legend.key = element_blank())
+
+        
+```
+
+```{r get predictions 2}
+ImageFeaturePlot(nano.obj, features = c("Macrophages", "Fibroblast"), mols.size = 0.2, max.cutoff = "q95")
+# ImageFeaturePlot(nano.obj, features = c("Macrophages", "Fibroblast"), max.cutoff = "q95")
+```
+## Visualization of cell type and expression localization patterns
+
+As in the previous example, `ImageDimPlot()` plots c ells based on their spatial locations, and colors them based on their assigned cell type. Notice that the basal cell population (tumor cells) is tightly spatially organized, as expected.
+
+
+```{r set predictions}
+nano.obj <- readRDS("./data/Lung5_Rep1/nano.obj.predictions.RDS")
+nano.obj$predicted.id <- GetTransferPredictions(nano.obj)
+Idents(nano.obj) <- "predicted.id"
+# SpatialDimPlot(nano.obj, cells.highlight = CellsByIdentities(object = nano.obj, idents = c("Macrophages", "Mast cell", "Fibroblast")), facet.highlight = TRUE)
+ImageDimPlot(nano.obj, fov = Images(nano.obj)[1], axes = TRUE, cols = "glasbey", border.color = "black")
+```
+```{r set predictions 2}
+ImageDimPlot(nano.obj, fov =Images(nano.obj)[1], cells = WhichCells(nano.obj, idents = c("Mast cell", "Macrophages", "Fibroblast", "T cell")), cols = c("red", "orange", "green", "blue"), size = 0.6)
+```
+
+We can also visualize gene expression markers a few different ways:
+```{r set predictions 3}
+DefaultAssay(nano.obj) <- "RNA"
+VlnPlot(nano.obj, features = "KRT17", assay = "RNA", layer = "counts", pt.size = 0.1, y.max = 30) + NoLegend()
+```  
+
+
+
+```{r, fig.width=5, fig.height=4}
+FeaturePlot(nano.obj, slot = "counts" ,features = "KRT17", max.cutoff = "q95")
+```
+
+```{r, fig.height=4, fig.width=8}
+p1 <- ImageFeaturePlot(nano.obj, fov = Images(nano.obj)[1], features = "KRT17", max.cutoff = "q95")
+p2 <- ImageDimPlot(nano.obj, fov = Images(nano.obj)[1], alpha = 1, molecules = "KRT17", nmols = 10000, mols.size = 0.2)# + NoLegend()
+p1 + p2
+```
+
+We can plot molecules in order to co-visualize the expression of multiple markers, including KRT17 (basal cells), C1QA (macrophages), IL7R (T cells), and TAGLN (Smooth muscle cells).
+
+```{r, fig.width=10, fig.height=7}
+DefaultAssay(nano.obj) <- "RNA"
+# Plot some of the molecules which seem to display spatial correlation with each other
+ImageDimPlot(nano.obj, group.by = "orig.ident", alpha = 0.3, molecules = c("KRT17", "C1QA", "IL7R", "TAGLN"), nmols =20000, mols.size=1, mols.cols = "glasbey")
+
+ImageFeaturePlot(nano.obj, fov = Images(nano.obj)[1], features = c("KRT17", "C1QA", "IL7R", "TAGLN"), max.cutoff = "q95")
+```
+
+We zoom in on one basal-rich region using the `Crop()` function. Once zoomed-in, we can visualize individual cell boundaries as well in all visualizations.
+
+
+
+<details>
+  <summary>**Session Info**</summary>
+```{r}
+sessionInfo()
+```
+</details>
+
+```{r save.times, include=FALSE}
+write.csv(x = t(as.data.frame(all_times)), file = "../output/timings/seurat5_spatial_vignette_2.csv")
+```
